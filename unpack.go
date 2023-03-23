@@ -9,13 +9,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 )
 
-const ESC = '\x1b'
-
 var inFile = flag.String("input_filename", "FDP1CN1416AR_nbx_signed.ful", "name of input file")
-var loaderOutFile = flag.String("loader_output_filename", "out.flasher", "name of output file for binary s-rec loader")
-var binSRecOutFile = flag.String("binary_srec_output_filename", "out.data", "name of output file for binary s-rec data")
+var intermediatesPrefix = flag.String("intermediates_prefix", "", "if nonempty, writes intermediate files with this prefix")
 
 type rasterState struct {
 	height, width uint
@@ -26,13 +24,13 @@ type rasterState struct {
 	pad           bool
 }
 
-type parameter struct {
+type pclParam struct {
 	c    byte
 	val  int
 	sign byte
 }
 
-func (p *parameter) String() string {
+func (p *pclParam) String() string {
 	s := ""
 	if p.sign != 0 {
 		s = fmt.Sprintf(", sign: %q", p.sign)
@@ -40,11 +38,11 @@ func (p *parameter) String() string {
 	return fmt.Sprintf("{command %q, value %v%s}", p.c, p.val, s)
 }
 
-func splitGroup(g []byte) ([]*parameter, error) {
+func splitGroup(g []byte) ([]*pclParam, error) {
 	r := bytes.NewReader(g)
 
-	var ret []*parameter
-	curr := &parameter{}
+	var ret []*pclParam
+	curr := &pclParam{}
 	for r.Len() > 0 {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -69,7 +67,7 @@ func splitGroup(g []byte) ([]*parameter, error) {
 				curr.sign = 0
 			}
 			ret = append(ret, curr)
-			curr = &parameter{}
+			curr = &pclParam{}
 
 		default:
 			return nil, fmt.Errorf("invalid group char %q", b)
@@ -334,28 +332,42 @@ func decompress(data []byte, method uint, seed []byte, b map[uint]uint, inpos ui
 	return ret, nil
 }
 
-func writeOutputs(data []byte, b map[uint]uint) error {
-	log.Printf("Writing output files")
+func maybeWriteIntermediate(data []byte, suffix string) error {
+	prefix := *intermediatesPrefix
+	if prefix == "" {
+		return nil
+	}
+
+	filename := fmt.Sprintf("%s.%s", prefix, suffix)
+	if err := os.WriteFile(filename, data, 0666); err != nil {
+		return err
+	}
+
+	log.Printf("Wrote %d bytes to %v", len(data), filename)
+	return nil
+}
+
+func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
+	log.Printf("Extracting flasher and flash image")
 	r := bufio.NewReader(bytes.NewReader(data))
-	var loader []byte
+	var flasher []byte
 	for {
 		line, err := r.ReadBytes('\n')
 		if err != nil {
-			return fmt.Errorf("can't read s-record line: %w", err)
+			return nil, fmt.Errorf("can't read s-record line: %w", err)
 		}
-		loader = append(loader, line...)
+		flasher = append(flasher, line...)
 		if line[0] == 'P' {
 			break
 		}
 	}
-	if err := os.WriteFile(*loaderOutFile, loader, 0666); err != nil {
-		return fmt.Errorf("can't write loader output file: %w", err)
-	}
-	log.Printf("Wrote %d bytes to %v", len(loader), *loaderOutFile)
 
-	var binsrec []byte
-	var srec []byte
-	pos := uint(len(loader))
+	if err := maybeWriteIntermediate(flasher, "flasher.srec"); err != nil {
+		return nil, fmt.Errorf("can't write flasher output file: %w", err)
+	}
+
+	var binsrec, srec []byte
+	pos := uint(len(flasher))
 	line := 0
 	for r.Size() > 0 {
 		line += 1
@@ -364,26 +376,26 @@ func writeOutputs(data []byte, b map[uint]uint) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("can't read type from binary s-record: %w", err)
+			return nil, fmt.Errorf("can't read type from binary s-record: %w", err)
 		}
 		pos += 1
 		//log.Printf("L%d: at offset 0x%x (%d), type: %02X", line, off, off, t)
-		binsrec = append(binsrec, fmt.Sprintf("S%c", t)...)
-		srec = append(srec, t)
+		binsrec = append(binsrec, t)
+		srec = append(srec, fmt.Sprintf("S%c", t)...)
 
 		l, err := r.ReadByte()
 		if err != nil {
-			return fmt.Errorf("can't read length from binary s-record: %w", err)
+			return nil, fmt.Errorf("can't read length from binary s-record: %w", err)
 		}
 		pos += 1
 		csum := uint16(l)
 		//log.Printf("  length: %02X", l)
-		binsrec = append(binsrec, fmt.Sprintf("%02X", l)...)
-		srec = append(srec, l)
+		binsrec = append(binsrec, l)
+		srec = append(srec, fmt.Sprintf("%02X", l)...)
 
 		data := make([]byte, l)
 		if err := readExact(r, data); err != nil {
-			return fmt.Errorf("can't read binary s-record data: %w", err)
+			return nil, fmt.Errorf("can't read binary s-record data: %w", err)
 		}
 		if len(data) > 0 {
 			for _, d := range data[:len(data)-1] {
@@ -393,56 +405,45 @@ func writeOutputs(data []byte, b map[uint]uint) error {
 			got := data[len(data)-1]
 			if byte(csum) != got {
 				for i := uint(0); i < uint(l); i++ {
-					log.Printf("[0x%02x = %02X] output offset 0x%x (0x%x @ payload), source at 0x%x", i, data[i], pos+i, pos-uint(len(loader))+i, b[pos+i])
+					log.Printf("[0x%02x = %02X] output offset 0x%x (0x%x @ payload), source at 0x%x", i, data[i], pos+i, pos-uint(len(flasher))+i, b[pos+i])
 				}
 				log.Printf("data with checksum: % 02X", data)
-				return fmt.Errorf("checksum mismatch, got: %02X, want: %02X", data[len(data)-1], csum)
+				return nil, fmt.Errorf("checksum mismatch, got: %02X, want: %02X", data[len(data)-1], csum)
 				//data[len(data)-1] = byte(csum)
 			}
 		}
-		binsrec = append(binsrec, fmt.Sprintf("%02X", data)...)
-		binsrec = append(binsrec, '\n')
-		srec = append(srec, data...)
+		srec = append(srec, fmt.Sprintf("%02X", data)...)
+		srec = append(srec, '\n')
+		binsrec = append(binsrec, data...)
 		pos += uint(l)
 
 	}
 
-	if err := os.WriteFile(*binSRecOutFile, binsrec, 0666); err != nil {
-		return fmt.Errorf("can't write binary s-record output file: %w", err)
+	if err := maybeWriteIntermediate(binsrec, "flasher_payload.bin"); err != nil {
+		return nil, fmt.Errorf("can't write binary s-record output file: %w", err)
 	}
-	log.Printf("Wrote %d bytes to %v", len(binsrec), *binSRecOutFile)
+	if err := maybeWriteIntermediate(srec, "flasher_payload.srec"); err != nil {
+		return nil, fmt.Errorf("can't write ascii s-record output file: %w", err)
+	}
 
-	if err := os.WriteFile("foo.bin.sd", srec, 0666); err != nil {
-		return fmt.Errorf("can't write foo.bin.sd: %w", err)
-	}
-	log.Printf("Wrote %d bytes to foo.bin.sd", len(srec))
-	return nil
+	return srec, nil
 }
 
-func main() {
-	flag.Parse()
-
-	data, err := os.ReadFile(*inFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Read %d bytes from %s", len(data), *inFile)
-
-	var seg0 []byte
+func pcl2flash(data []byte) ([]byte, error) {
 	var inpos, seg0pos uint
+	segments := make(map[uint][]byte)
 	b := make(map[uint]uint) // output offset -> input offset
 	s := &rasterState{}
 	r := bufio.NewReader(bytes.NewReader(data))
 	for r.Size() > 0 {
-		text, err := r.ReadBytes(ESC)
+		text, err := r.ReadBytes('\x1b')
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-
-			log.Fatalf("can't read from %q: %v", *inFile, err)
+			return nil, fmt.Errorf("error reading from input buffer: %w", err)
 		}
+
 		inpos += uint(len(text))
 		text = text[:len(text)-1] // strip ESC
 		if len(text) > 0 {
@@ -473,16 +474,148 @@ func main() {
 			//log.Printf("received data: %q", data)
 			log.Printf("received %d bytes of data, inflated to %d", len(s.data), len(data))
 			if s.segment == 0 {
-				seg0 = append(seg0, data...)
 				log.Printf("at input offset 0x%x", inpos)
 			}
+			segments[s.segment] = append(segments[s.segment], data...)
 			s.seed = data
 			s.data = nil
 		}
 		inpos += n
 	}
 
-	if err := writeOutputs(seg0, b); err != nil {
-		log.Fatalf("can't write output files: %v", err)
+	for i, data := range segments {
+		if err := maybeWriteIntermediate(data, fmt.Sprintf("pclseg%d.bin", i)); err != nil {
+			return nil, fmt.Errorf("can't write decoded PCL segment %d: %w", err)
+		}
 	}
+
+	seg0, ok := segments[0]
+	if !ok {
+		return nil, errors.New("no segment 0 found")
+	}
+
+	payload, err := getFlasherPayload(seg0, b)
+	if err != nil {
+		return nil, fmt.Errorf("can't extract flasher payload from PCL segment 0: %w", err)
+	}
+
+	flashSegs, err := unsrec(payload)
+	if err != nil {
+		return nil, fmt.Errorf("can't convert flasher payload s-record to binary: %w", err)
+	}
+
+	if len(flashSegs) != 1 {
+		return nil, errors.New("flasher payload has not exactly one s-record segment")
+	}
+
+	for addr, data := range flashSegs {
+		log.Printf("flash at 0x%08x", addr)
+		return data, nil
+	}
+
+	return nil, errors.New("unreachable")
+}
+
+func parseBytes(s string) ([]byte, error) {
+	if len(s)%2 != 0 {
+		return nil, errors.New("odd number of bytes")
+	}
+	ret := make([]byte, 0, len(s)/2)
+	for i := 0; i < len(s); i += 2 {
+		b, err := strconv.ParseUint(s[i:i+2], 16, 8)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, byte(b))
+	}
+	return ret, nil
+}
+
+func unsrec(data []byte) (map[uint64][]byte, error) {
+	sc := bufio.NewScanner(bytes.NewBuffer(data))
+	ret := make(map[uint64][]byte)
+	var lastAddr, blockAddr uint64
+	lineno := 0
+	for sc.Scan() {
+		lineno++
+		line := sc.Text()
+		if len(line) < 6 {
+			return nil, fmt.Errorf("line %d is too short", lineno)
+		}
+		if line[0] != 'S' {
+			return nil, fmt.Errorf("line %d does not start with 'S'", lineno)
+		}
+		line = line[1 : len(line)-2] // strip leading S and trailing checksum
+		t := line[0]
+		line = line[3:] // strip type and length
+		//log.Printf("line: %q", line)
+		switch t {
+		case '0':
+			addr, err := strconv.ParseUint(line[0:4], 16, 16)
+			if err != nil {
+				return nil, fmt.Errorf("can't parse address in line %d: %w", lineno, err)
+			}
+
+			data, err := parseBytes(line[4:])
+			if err != nil {
+				return nil, fmt.Errorf("can't parse data in line %d: %w", lineno, err)
+			}
+
+			log.Printf("header at addr %04x: %q", addr, string(data))
+
+		case '3':
+			addr, err := strconv.ParseUint(line[0:8], 16, 32)
+			if err != nil {
+				return nil, fmt.Errorf("can't parse address in line %d: %w", lineno, err)
+			}
+
+			data, err := parseBytes(line[8:])
+			if err != nil {
+				return nil, fmt.Errorf("can't parse data in line %d: %w", lineno, err)
+			}
+
+			if addr != lastAddr {
+				log.Printf("new block at %08x", addr)
+				blockAddr = addr
+				lastAddr = addr
+			}
+
+			ret[blockAddr] = append(ret[blockAddr], data...)
+			lastAddr += uint64(len(data))
+
+		case '7':
+			if len(line) != 8 {
+				return nil, fmt.Errorf("start address not 8 hex characters at line %d", lineno)
+			}
+			addr, err := strconv.ParseUint(line, 16, 32)
+			if err != nil {
+				return nil, fmt.Errorf("can't parse start address: %v", err)
+			}
+			log.Printf("start address: %08x", addr)
+
+		default:
+			return nil, fmt.Errorf("unknown S-record type %c", t)
+		}
+	}
+
+	return ret, nil
+}
+
+func main() {
+	flag.Parse()
+
+	data, err := os.ReadFile(*inFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Read %d bytes from %s", len(data), *inFile)
+
+	payload, err := pcl2flash(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("flash len: %d", len(payload))
+
 }
