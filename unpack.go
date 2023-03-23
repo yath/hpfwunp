@@ -7,11 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 
 	"github.com/blacktop/lzss"
+	"github.com/golang/glog"
 )
 
 var inFile = flag.String("input_filename", "", "name of input file")
@@ -116,14 +116,14 @@ func readPCL(r *bufio.Reader, s *rasterState) (uint, error) {
 				break
 			}
 		}
-		log.Printf("PCL command group: %q", buf)
+		glog.V(1).Infof("PCL command group: %q", buf)
 		gs, err := splitGroup(buf[1:]) // skip *
 		if err != nil {
 			return pos, fmt.Errorf("can't split group %q: %w", buf, err)
 		}
 
 		if buf[0] == '%' {
-			log.Printf("UEL: %q", buf)
+			glog.V(1).Infof("UEL: %q", buf)
 			break
 		}
 
@@ -131,21 +131,21 @@ func readPCL(r *bufio.Reader, s *rasterState) (uint, error) {
 		for _, g := range gs {
 			switch g.c {
 			case 'S':
-				log.Printf("set raster width: %v", g.val)
+				glog.V(1).Infof("set raster width: %v", g.val)
 				s.width = uint(g.val)
 			case 'T':
-				log.Printf("set raster height: %v", g.val)
+				glog.V(1).Infof("set raster height: %v", g.val)
 				s.height = uint(g.val)
 			case 'X':
-				log.Printf("set raster X offset: %v", g.val)
+				glog.V(1).Infof("set raster X offset: %v", g.val)
 				s.x = uint(g.val)
 			case 'Y':
 				if g.sign == '+' {
-					log.Printf("set segment #%v, reset Y", g.val)
+					glog.V(1).Infof("set segment #%v, reset Y", g.val)
 					s.segment = uint(g.val)
 					s.y = 0
 				} else {
-					log.Printf("set raster Y offset: %v", g.val)
+					glog.V(1).Infof("set raster Y offset: %v", g.val)
 					s.y = uint(g.val)
 				}
 			case 'V', 'W':
@@ -154,7 +154,7 @@ func readPCL(r *bufio.Reader, s *rasterState) (uint, error) {
 					by = "block"
 				}
 				s.pad = (g.c == 'V') // Only pad by-plane data
-				log.Printf("transfer %d bytes raster data by %s", g.val, by)
+				glog.V(1).Infof("transfer %d bytes raster data by %s", g.val, by)
 				if s.data != nil {
 					return pos, fmt.Errorf("already have %d bytes of data", len(s.data))
 				}
@@ -166,14 +166,14 @@ func readPCL(r *bufio.Reader, s *rasterState) (uint, error) {
 				s.data = buf
 
 			case 'M':
-				log.Printf("set compression method %d", g.val)
+				glog.V(1).Infof("set compression method %d", g.val)
 				s.compression = uint(g.val)
 
 			case 'A':
-				log.Printf("start raster graphics")
+				glog.V(1).Infof("start raster graphics")
 
 			case 'C':
-				log.Printf("end raster graphics")
+				glog.V(1).Infof("end raster graphics")
 
 			default:
 				return pos, fmt.Errorf("unknown command %q", g.c)
@@ -181,10 +181,10 @@ func readPCL(r *bufio.Reader, s *rasterState) (uint, error) {
 		}
 
 	case cmd == 'E':
-		log.Printf("Device reset")
+		glog.V(1).Infof("Device reset")
 
 	default:
-		log.Printf("Unknown PCL command %q", cmd)
+		glog.Warningf("Unknown PCL command %q", cmd)
 	}
 
 	return pos, nil
@@ -199,7 +199,7 @@ func decompressTIFF(r *bytes.Reader, b map[uint]uint, inpos uint, outpos *uint) 
 		}
 		inpos += 1
 		c := int8(ctl)
-		log.Printf("c: %d", c)
+		glog.V(1).Infof("c: %d", c)
 		if c == -128 {
 			// NOP
 			continue
@@ -232,7 +232,7 @@ func decompressTIFF(r *bytes.Reader, b map[uint]uint, inpos uint, outpos *uint) 
 			inpos += 1
 		}
 
-		log.Printf("appending %d literal bytes: % 02X", ct, lit)
+		glog.V(1).Infof("appending %d literal bytes: % 02X", ct, lit)
 		ret = append(ret, lit...)
 	}
 
@@ -249,9 +249,9 @@ func decompressDeltaRow(r *bytes.Reader, seed []byte, b map[uint]uint, inpos uin
 
 		ct := (ctl >> 5) + 1
 		off := ctl & 0x1f
-		log.Printf("first offset: %v", off)
+		glog.V(1).Infof("first offset: %v", off)
 		for i := uint8(0); i < off; i++ {
-			log.Printf("pad with %x from old buffer", seed[len(ret)])
+			glog.V(1).Infof("pad with %x from old buffer", seed[len(ret)])
 			ret = append(ret, seed[len(ret)])
 			b[*outpos] = inpos
 			*outpos += 1
@@ -265,9 +265,9 @@ func decompressDeltaRow(r *bytes.Reader, seed []byte, b map[uint]uint, inpos uin
 				if err != nil {
 					return nil, fmt.Errorf("can't read offset byte: %w", err)
 				}
-				log.Printf("another offset: %v", off)
+				glog.V(1).Infof("another offset: %v", off)
 				for i := uint8(0); i < off; i++ {
-					log.Printf("pad with %x from old buffer", seed[len(ret)])
+					glog.V(1).Infof("pad with %x from old buffer", seed[len(ret)])
 					ret = append(ret, seed[len(ret)])
 					b[*outpos] = inpos
 					*outpos += 1
@@ -278,7 +278,7 @@ func decompressDeltaRow(r *bytes.Reader, seed []byte, b map[uint]uint, inpos uin
 				}
 			}
 		}
-		log.Printf("copying %d bytes to offset %d", ct, len(ret))
+		glog.V(1).Infof("copying %d bytes to offset %d", ct, len(ret))
 		oldpos := len(ret)
 		for i := uint8(0); i < ct; i++ {
 			bt, err := r.ReadByte()
@@ -290,7 +290,7 @@ func decompressDeltaRow(r *bytes.Reader, seed []byte, b map[uint]uint, inpos uin
 			*outpos += 1
 		}
 		inpos += 1
-		log.Printf("  copied: %q", ret[oldpos:])
+		glog.V(1).Infof("  copied: %q", ret[oldpos:])
 	}
 	return ret, nil
 }
@@ -333,7 +333,7 @@ func decompress(data []byte, method uint, seed []byte, b map[uint]uint, inpos ui
 		return nil, fmt.Errorf("Unsupported compression method %s", m)
 	}
 
-	log.Printf("Decompressed %d %s bytes to %d", len(data), cms[method], len(ret))
+	glog.Infof("Decompressed %d %s bytes to %d", len(data), cms[method], len(ret))
 	return ret, nil
 }
 
@@ -348,12 +348,12 @@ func maybeWriteIntermediate(data []byte, suffix string) error {
 		return err
 	}
 
-	log.Printf("Wrote %d bytes to %v", len(data), filename)
+	glog.Infof("Wrote %d bytes to %v", len(data), filename)
 	return nil
 }
 
 func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
-	log.Printf("Extracting flasher and flash image")
+	glog.Infof("Extracting flasher and flash image")
 	r := bufio.NewReader(bytes.NewReader(data))
 	var flasher []byte
 	for {
@@ -384,7 +384,7 @@ func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
 			return nil, fmt.Errorf("can't read type from binary s-record: %w", err)
 		}
 		pos += 1
-		//log.Printf("L%d: at offset 0x%x (%d), type: %02X", line, off, off, t)
+		glog.V(2).Infof("L%d: at offset 0x%x (%d), type: %02X", line, pos, pos, t)
 		binsrec = append(binsrec, t)
 		srec = append(srec, fmt.Sprintf("S%c", t)...)
 
@@ -394,7 +394,7 @@ func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
 		}
 		pos += 1
 		csum := uint16(l)
-		//log.Printf("  length: %02X", l)
+		glog.V(2).Infof("  length: %02X", l)
 		binsrec = append(binsrec, l)
 		srec = append(srec, fmt.Sprintf("%02X", l)...)
 
@@ -410,11 +410,10 @@ func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
 			got := data[len(data)-1]
 			if byte(csum) != got {
 				for i := uint(0); i < uint(l); i++ {
-					log.Printf("[0x%02x = %02X] output offset 0x%x (0x%x @ payload), source at 0x%x", i, data[i], pos+i, pos-uint(len(flasher))+i, b[pos+i])
+					glog.V(1).Infof("[0x%02x = %02X] output offset 0x%x (0x%x @ payload), source at 0x%x", i, data[i], pos+i, pos-uint(len(flasher))+i, b[pos+i])
 				}
-				log.Printf("data with checksum: % 02X", data)
+				glog.V(1).Infof("data with checksum: % 02X", data)
 				return nil, fmt.Errorf("checksum mismatch, got: %02X, want: %02X", data[len(data)-1], csum)
-				//data[len(data)-1] = byte(csum)
 			}
 		}
 		srec = append(srec, fmt.Sprintf("%02X", data)...)
@@ -435,6 +434,7 @@ func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
 }
 
 func pcl2flash(data []byte) ([]byte, error) {
+	glog.Info("Decompressing PCL")
 	var inpos, seg0pos uint
 	segments := make(map[uint][]byte)
 	b := make(map[uint]uint) // output offset -> input offset
@@ -452,34 +452,34 @@ func pcl2flash(data []byte) ([]byte, error) {
 		inpos += uint(len(text))
 		text = text[:len(text)-1] // strip ESC
 		if len(text) > 0 {
-			log.Printf("text: %q", text)
+			glog.V(1).Infof("text: %q", text)
 		}
 
 		n, err := readPCL(r, s)
 		if err != nil {
-			log.Fatalf("can't parse PCL: %v", err)
+			return nil, fmt.Errorf("can't parse PCL: %w", err)
 		}
 
 		if s.data != nil {
 			data, err := decompress(s.data, s.compression, s.seed, b, inpos, &seg0pos)
 			if err != nil {
-				log.Fatalf("can't decompress data: %v", err)
+				return nil, fmt.Errorf("can't decompress data: %w", err)
 			}
 			if s.pad {
 				for len(data) < int(s.width) {
 					if s.compression == 3 {
-						log.Printf("pad seed %x because len(data) = %d and s.width = %d", s.seed[len(data)], len(data), int(s.width))
+						glog.V(1).Infof("pad seed %x because len(data) = %d and s.width = %d", s.seed[len(data)], len(data), int(s.width))
 						data = append(data, s.seed[len(data)])
 					} else {
-						log.Printf("pad zero because len(data) = %d and s.width = %d", s.seed[len(data)], len(data), int(s.width))
+						glog.V(1).Infof("pad zero because len(data) = %d and s.width = %d", s.seed[len(data)], len(data), int(s.width))
 						data = append(data, 0)
 					}
 				}
 			}
-			//log.Printf("received data: %q", data)
-			log.Printf("received %d bytes of data, inflated to %d", len(s.data), len(data))
-			if s.segment == 0 {
-				log.Printf("at input offset 0x%x", inpos)
+			glog.V(2).Infof("received data: %q", data)
+			glog.V(1).Infof("received %d bytes of data, inflated to %d", len(s.data), len(data))
+			if glog.V(1) && s.segment == 0 {
+				glog.Infof("at input offset 0x%x", inpos)
 			}
 			segments[s.segment] = append(segments[s.segment], data...)
 			s.seed = data
@@ -514,7 +514,7 @@ func pcl2flash(data []byte) ([]byte, error) {
 	}
 
 	for addr, data := range flashSegs {
-		log.Printf("flash at 0x%08x", addr)
+		glog.Infof("Flash is at 0x%08x", addr)
 		if err := maybeWriteIntermediate(data, fmt.Sprintf("flash.%08x.bin", addr)); err != nil {
 			return nil, fmt.Errorf("can't write flash contents: %w", err)
 		}
@@ -556,7 +556,7 @@ func unsrec(data []byte) (map[uint64][]byte, error) {
 		line = line[1 : len(line)-2] // strip leading S and trailing checksum
 		t := line[0]
 		line = line[3:] // strip type and length
-		//log.Printf("line: %q", line)
+		glog.V(2).Infof("line: %q", line)
 		switch t {
 		case '0':
 			addr, err := strconv.ParseUint(line[0:4], 16, 16)
@@ -569,7 +569,7 @@ func unsrec(data []byte) (map[uint64][]byte, error) {
 				return nil, fmt.Errorf("can't parse data in line %d: %w", lineno, err)
 			}
 
-			log.Printf("header at addr %04x: %q", addr, string(data))
+			glog.V(1).Infof("header at addr %04x: %q", addr, string(data))
 
 		case '3':
 			addr, err := strconv.ParseUint(line[0:8], 16, 32)
@@ -583,7 +583,7 @@ func unsrec(data []byte) (map[uint64][]byte, error) {
 			}
 
 			if addr != lastAddr {
-				log.Printf("new block at %08x", addr)
+				glog.V(1).Infof("new block at %08x", addr)
 				blockAddr = addr
 				lastAddr = addr
 			}
@@ -599,7 +599,7 @@ func unsrec(data []byte) (map[uint64][]byte, error) {
 			if err != nil {
 				return nil, fmt.Errorf("can't parse start address: %v", err)
 			}
-			log.Printf("start address: %08x", addr)
+			glog.V(1).Infof("start address: %08x", addr)
 
 		default:
 			return nil, fmt.Errorf("unknown S-record type %c", t)
@@ -737,7 +737,6 @@ func (m *memory) cstring(addr uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	//log.Printf("cstring(%x), b = %q", addr, b)
 
 	zero := bytes.IndexByte(b, byte(0))
 	if zero < 0 {
@@ -771,7 +770,7 @@ func (m *memory) addSegment(start uint32, data []byte, info *segmentInfo) (*memo
 }
 
 func (m *memory) memset(addr, val, count uint32, si *segmentInfo) error {
-	log.Printf("memset(0x%x, %d, %d)", addr, val, count)
+	glog.V(1).Infof("memset(0x%x, %d, %d)", addr, val, count)
 	if count != si.size {
 		return fmt.Errorf("requested to memset %d bytes, but segment has %d bytes", count, si.size)
 	}
@@ -785,7 +784,7 @@ func (m *memory) memset(addr, val, count uint32, si *segmentInfo) error {
 }
 
 func (m *memory) memcpy(dst, src, count uint32, si *segmentInfo) error {
-	log.Printf("memcpy(0x%x, 0x%x, %d)", dst, src, count)
+	glog.V(1).Infof("memcpy(0x%x, 0x%x, %d)", dst, src, count)
 	if count != si.size {
 		return fmt.Errorf("requested to memcpy %d bytes, but segment has %d bytes", count, si.size)
 	}
@@ -799,7 +798,7 @@ func (m *memory) memcpy(dst, src, count uint32, si *segmentInfo) error {
 }
 
 func (m *memory) uncompress(dst, src, count uint32, si *segmentInfo) error {
-	log.Printf("uncompress(0x%x, 0x%x, %d)", dst, src, count)
+	glog.V(1).Infof("uncompress(0x%x, 0x%x, %d)", dst, src, count)
 
 	cdata, err := m.slice(src, src+count)
 	if err != nil {
@@ -835,7 +834,7 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 		}
 		hf[i] = val
 	}
-	log.Printf("header fields: %#v", hf)
+	glog.V(1).Infof("header fields: %#v", hf)
 
 	si := make(map[uint32]*segmentInfo)
 	secAddr := hf[16]
@@ -848,7 +847,7 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 			}
 			sf[i] = val
 		}
-		log.Printf("segmentInfo fields: %#v", sf)
+		glog.V(1).Infof("segmentInfo fields: %#v", sf)
 
 		name, err := m.cstring(sf[1])
 		if err != nil {
@@ -923,9 +922,10 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 }
 
 func dumpFlash(data []byte) error {
+	glog.Info("Dumping flash contents...")
 	data, err := removeOOB(data)
 	if err != nil {
-		log.Fatalf("can't remove OOB data: %v", err)
+		return fmt.Errorf("can't remove OOB data: %w", err)
 	}
 
 	if err = maybeWriteIntermediate(data, "flash.nooob.bin"); err != nil {
@@ -934,10 +934,10 @@ func dumpFlash(data []byte) error {
 
 	header, err := parseHeader(data)
 	if err != nil {
-		log.Fatalf("can't parse header: %v", err)
+		return fmt.Errorf("can't parse header: %v", err)
 	}
 
-	log.Printf("header: %#v", header)
+	glog.Infof("App header: %#v", header)
 
 	pageSize := uint32(*flashPageSize)
 	if header.pageSize1 != pageSize {
@@ -953,7 +953,7 @@ func dumpFlash(data []byte) error {
 	if rem := codeStart % pageSize; rem != 0 {
 		codeStart += pageSize - rem
 	}
-	log.Printf("Code start at 0x%x", codeStart)
+	glog.Infof("Code start at 0x%x", codeStart)
 
 	code := data[codeStart : codeStart+header.loadSize]
 	if err := maybeWriteIntermediate(code, "flash.code.bin"); err != nil {
@@ -975,31 +975,33 @@ func dumpFlash(data []byte) error {
 			return fmt.Errorf("can't write segment 0x%08x: %w", s.start, err)
 		}
 
-		log.Printf("Wrote %v (%d bytes) to %v", s, s.size(), fn)
+		glog.Infof("Wrote %v (%d bytes) to %v", s, s.size(), fn)
 	}
 
 	return nil
 }
 func main() {
+	flag.Set("logtostderr", "true")
 	flag.Parse()
 
 	if *inFile == "" || *outPrefix == "" {
-		log.Fatalf("Both -input_filename and -output_prefix must be set.")
+		glog.Exitf("Both -input_filename and -output_prefix must be set.")
 	}
 
 	data, err := os.ReadFile(*inFile)
 	if err != nil {
-		log.Fatalf("Can't read input file: %v", err)
+		glog.Exitf("Can't read input file: %v", err)
 	}
 
-	log.Printf("Read %d bytes from %s", len(data), *inFile)
+	glog.Infof("Read %d bytes from %s", len(data), *inFile)
 
 	payload, err := pcl2flash(data)
 	if err != nil {
-		log.Fatalf("Can't extract flash image from PCL: %v", err)
+		glog.Exitf("Can't extract flash image from PCL: %v", err)
 	}
+	glog.Infof("Extracted %d payload bytes from PCL", len(payload))
 
 	if err = dumpFlash(payload); err != nil {
-		log.Fatalf("Can't dump flash image: %v", err)
+		glog.Exitf("Can't dump flash image: %v", err)
 	}
 }
