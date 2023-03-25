@@ -1030,7 +1030,15 @@ func main() {
 	flag.Parse()
 
 	if *inFile == "" || *outPrefix == "" {
-		glog.Exitf("Both -input_filename and -output_prefix must be set.")
+		if len(os.Args) < 3 {
+			glog.Exitf("Both -input_filename and -output_prefix must be set.")
+		}
+		*inFile = os.Args[1]
+		*outPrefix = os.Args[2]
+	}
+
+	if *intermediatesPrefix == "" && len(os.Args) == 4 {
+		*intermediatesPrefix = os.Args[3]
 	}
 
 	data, err := os.ReadFile(*inFile)

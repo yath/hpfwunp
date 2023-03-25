@@ -13,7 +13,7 @@ credits goes to them.
 Usage:
 
 ```shell
-$ go run unpack.go -input_filename foo_nbx_signed.ful -output_prefix foo_nbx_signed.extracted
+$ go run unpack.go foo_nbx_signed.ful foo_nbx_signed.extracted
 […]
 $ ls foo_nbx_signed.extracted.*
 […]
