@@ -23,4 +23,18 @@ To dump the intermediate extraction results for debugging or further analysis,
 set the `-intermediates_prefix` to a filename prefix they should be dumped to.
 Also see the `-v` option to increase the log level.
 
-Happy research!
+The `ghidra_import.py` script can be used on the `.romnosi_text` image to load
+additional segments. For headless usage, a `ghidra_import.properties` with the
+text `Select metadata JSON OK = <path to app.json>` can be created in the same
+directory and `analyzeHeadless` be invoked like:
+
+```shell
+$GHIDRA_DIR/support/analyzeHeadless <project dir> <project name> \
+  -import foo.0x48...romnosi_text.bin \
+  -processor ARM:BE:32:Cortex \
+  -scriptPath $(pwd) \
+  -propertiesPath $(pwd) \
+  -preScript ghidra_import.py
+```
+
+Happy researching!

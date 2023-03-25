@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/blacktop/lzss"
@@ -653,46 +655,57 @@ func parseHeader(data []byte) (*flashHeader, error) {
 	}, nil
 }
 
-type segmentInfo struct {
-	name                     string
-	start, size, flags, dest uint32
+type sectionInfo struct {
+	Name  string `json:"name"`
+	Start uint32 `json:"start_address"`
+	Size  uint32 `json:"size"`
+	Flags uint32 `json:"flags"`
+	Dest  uint32 `json:"dest_address,omitempty"`
 }
 
-func (si *segmentInfo) String() string {
+func (si *sectionInfo) String() string {
 	dst := ""
-	if si.dest != 0 {
-		dst = fmt.Sprintf(" => 0x%08x", si.dest)
+	if si.Dest != 0 {
+		dst = fmt.Sprintf(" => 0x%08x", si.Dest)
 	}
-	return fmt.Sprintf("section %q [0x%08x-0x%08x] flags 0x%x%s", si.name, si.start, si.start+si.size-1, si.flags, dst)
+	return fmt.Sprintf("section %q [0x%08x-0x%08x] flags 0x%x%s", si.Name, si.Start, si.Start+si.Size-1, si.Flags, dst)
+}
+
+type loadInfo struct {
+	Filename        string `json:"filename,omitempty"`
+	AllZeros        bool   `json:"all_zeros"`
+	FlashSourceAddr uint32 `json:"flash_source_start"`
+	FlashSourceLen  uint32 `json:"flash_source_len"`
 }
 
 type memorySegment struct {
-	start uint32
-	data  []byte
-	info  *segmentInfo
+	Start       uint32       `json:"start_address"`
+	Data        []byte       `json:"-"`
+	SectionInfo *sectionInfo `json:"section_info"`
+	LoadInfo    loadInfo     `json:"load_info"`
 }
 
 func (s *memorySegment) size() uint32 {
-	return uint32(len(s.data))
+	return uint32(len(s.Data))
 }
 
 func (s *memorySegment) hasAddr(addr uint32) bool {
-	return addr >= s.start && addr < s.start+s.size()
+	return addr >= s.Start && addr < s.Start+s.size()
 }
 
 func (s *memorySegment) String() string {
-	if s.info != nil {
-		return s.info.String()
+	if s.SectionInfo != nil {
+		return s.SectionInfo.String()
 	}
-	return fmt.Sprintf("[0x%08x-0x%08x]", s.start, s.start+s.size()-1)
+	return fmt.Sprintf("[0x%08x-0x%08x]", s.Start, s.Start+s.size()-1)
 }
 
 type memory struct {
-	s []*memorySegment
+	S []*memorySegment `json:"segments"`
 }
 
 func (m *memory) segmentFor(addr uint32) (*memorySegment, bool) {
-	for _, s := range m.s {
+	for _, s := range m.S {
 		if s.hasAddr(addr) {
 			return s, true
 		}
@@ -707,7 +720,7 @@ func (m *memory) slice(low, high uint32) ([]byte, error) {
 	}
 
 	if high == 0 {
-		high = ss.start + ss.size() + 1
+		high = ss.Start + ss.size() + 1
 	} else {
 		es, ok := m.segmentFor(high - 1)
 		if !ok {
@@ -719,8 +732,8 @@ func (m *memory) slice(low, high uint32) ([]byte, error) {
 		}
 	}
 
-	lowIdx, highIdx := low-ss.start, high-ss.start
-	return ss.data[lowIdx:highIdx], nil
+	lowIdx, highIdx := low-ss.Start, high-ss.Start
+	return ss.Data[lowIdx:highIdx], nil
 }
 
 func (m *memory) uint32be(addr uint32) (uint32, error) {
@@ -754,50 +767,61 @@ func (m *memory) cstringptr(ptr uint32) (string, error) {
 	return m.cstring(addr)
 }
 
-func (m *memory) addSegment(start uint32, data []byte, info *segmentInfo) (*memorySegment, error) {
-	ns := &memorySegment{start, data, info}
-
-	s, ok := m.segmentFor(ns.start)
+func (m *memory) addSegment(start uint32, data []byte, info *sectionInfo) (*memorySegment, error) {
+	ns := &memorySegment{Start: start, Data: data, SectionInfo: info}
+	s, ok := m.segmentFor(ns.Start)
 	if !ok {
-		s, ok = m.segmentFor(ns.start + ns.size() - 1)
+		s, ok = m.segmentFor(ns.Start + ns.size() - 1)
 	}
 	if ok {
 		return nil, fmt.Errorf("segment %v overlaps with existing segment %v", ns, s)
 	}
 
-	m.s = append(m.s, ns)
+	m.S = append(m.S, ns)
 	return ns, nil
 }
 
-func (m *memory) memset(addr, val, count uint32, si *segmentInfo) error {
+func (m *memory) memset(addr, val, count uint32, si *sectionInfo) error {
 	glog.V(1).Infof("memset(0x%x, %d, %d)", addr, val, count)
-	if count != si.size {
-		return fmt.Errorf("requested to memset %d bytes, but segment has %d bytes", count, si.size)
+	if count != si.Size {
+		return fmt.Errorf("requested to memset %d bytes, but segment has %d bytes", count, si.Size)
 	}
 	if val != 0 {
 		return errors.New("can only memset to zero")
 	}
 
 	data := make([]byte, count)
-	_, err := m.addSegment(addr, data, si)
-	return err
+	s, err := m.addSegment(addr, data, si)
+	if err != nil {
+		return fmt.Errorf("can't add segment: %w", err)
+	}
+
+	s.LoadInfo.AllZeros = true
+	return nil
 }
 
-func (m *memory) memcpy(dst, src, count uint32, si *segmentInfo) error {
+func (m *memory) memcpy(dst, src, count uint32, si *sectionInfo) error {
 	glog.V(1).Infof("memcpy(0x%x, 0x%x, %d)", dst, src, count)
-	if count != si.size {
-		return fmt.Errorf("requested to memcpy %d bytes, but segment has %d bytes", count, si.size)
+	if count != si.Size {
+		return fmt.Errorf("requested to memcpy %d bytes, but segment has %d bytes", count, si.Size)
 	}
 
 	data, err := m.slice(src, src+count)
 	if err != nil {
 		return err
 	}
-	_, err = m.addSegment(dst, data, si)
-	return err
+
+	s, err := m.addSegment(dst, data, si)
+	if err != nil {
+		return fmt.Errorf("can't add segment: %w", err)
+	}
+
+	s.LoadInfo.FlashSourceAddr = src
+	s.LoadInfo.FlashSourceLen = count
+	return nil
 }
 
-func (m *memory) uncompress(dst, src, count uint32, si *segmentInfo) error {
+func (m *memory) uncompress(dst, src, count uint32, si *sectionInfo) error {
 	glog.V(1).Infof("uncompress(0x%x, 0x%x, %d)", dst, src, count)
 
 	cdata, err := m.slice(src, src+count)
@@ -805,15 +829,21 @@ func (m *memory) uncompress(dst, src, count uint32, si *segmentInfo) error {
 		return err
 	}
 	data := lzss.Decompress(cdata)
-	if uint32(len(data)) != si.size {
-		return fmt.Errorf("uncompress inflated %d to %d bytes, but segment has %d bytes", count, len(data), si.size)
+	if uint32(len(data)) != si.Size {
+		return fmt.Errorf("uncompress inflated %d to %d bytes, but segment has %d bytes", count, len(data), si.Size)
 	}
 
 	_, err = m.addSegment(dst, data, si)
 	return err
 }
 
-func dumpApp(h *flashHeader, data []byte) (*memory, error) {
+type app struct {
+	Mem            *memory                 `json:"memory"`
+	EntryPoint     uint32                  `json:"entry_point"`
+	UnusedSections map[uint32]*sectionInfo `json:"unused_sections"`
+}
+
+func dumpApp(h *flashHeader, data []byte) (*app, error) {
 	apphdr := bytes.Index(data, []byte{0x3c, 0xa5, 0x5a, 0x3c})
 	if apphdr < 0 {
 		return nil, errors.New("app header not found")
@@ -836,7 +866,7 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 	}
 	glog.V(1).Infof("header fields: %#v", hf)
 
-	si := make(map[uint32]*segmentInfo)
+	si := make(map[uint32]*sectionInfo)
 	secAddr := hf[16]
 	for secAddr != 0 {
 		var sf [6]uint32
@@ -847,7 +877,7 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 			}
 			sf[i] = val
 		}
-		glog.V(1).Infof("segmentInfo fields: %#v", sf)
+		glog.V(1).Infof("sectionInfo fields: %#v", sf)
 
 		name, err := m.cstring(sf[1])
 		if err != nil {
@@ -855,33 +885,33 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 		}
 		start := sf[2]
 		if exist, ok := si[start]; ok {
-			return nil, fmt.Errorf("duplicate section definition for 0x%08x, prev = %s, curr = %s", start, exist.name, name)
+			return nil, fmt.Errorf("duplicate section definition for 0x%08x, prev = %s, curr = %s", start, exist.Name, name)
 		}
 
 		size := sf[3]
 		if size > 0 {
-			si[start] = &segmentInfo{
-				name:  name,
-				start: start,
-				size:  size,
-				flags: sf[4],
-				dest:  sf[5],
+			si[start] = &sectionInfo{
+				Name:  name,
+				Start: start,
+				Size:  size,
+				Flags: sf[4],
+				Dest:  sf[5],
 			}
 		}
 
 		secAddr = sf[0]
 	}
 
-	flashSegInfo, ok := si[h.loadAddr]
+	flashSectInfo, ok := si[h.loadAddr]
 	if !ok {
 		return nil, fmt.Errorf("section for flash at 0x%08x not found", h.loadAddr)
 	}
-	flashSeg.info = flashSegInfo
+	flashSeg.SectionInfo = flashSectInfo
 	delete(si, h.loadAddr)
 
 	funcs := []struct {
 		name       string
-		f          func(_, _, _ uint32, _ *segmentInfo) error
+		f          func(_, _, _ uint32, _ *sectionInfo) error
 		startField uint32
 		endField   uint32
 	}{
@@ -918,7 +948,11 @@ func dumpApp(h *flashHeader, data []byte) (*memory, error) {
 		}
 	}
 
-	return m, nil
+	return &app{
+		Mem:            m,
+		EntryPoint:     hf[13],
+		UnusedSections: si,
+	}, nil
 }
 
 func dumpFlash(data []byte) error {
@@ -937,7 +971,7 @@ func dumpFlash(data []byte) error {
 		return fmt.Errorf("can't parse header: %v", err)
 	}
 
-	glog.Infof("App header: %#v", header)
+	glog.Infof("Flash header: %#v", header)
 
 	pageSize := uint32(*flashPageSize)
 	if header.pageSize1 != pageSize {
@@ -964,19 +998,30 @@ func dumpFlash(data []byte) error {
 		return fmt.Errorf("remaining data (len = 0x%x) after code >= pageSize (0x%x)", rem, pageSize)
 	}
 
-	mem, err := dumpApp(header, code)
+	app, err := dumpApp(header, code)
 	if err != nil {
 		return fmt.Errorf("can't dump app: %w", err)
 	}
 
-	for _, s := range mem.s {
-		fn := fmt.Sprintf("%s.0x%08x%s.bin", *outPrefix, s.start, s.info.name)
-		if err := os.WriteFile(fn, s.data, 0666); err != nil {
-			return fmt.Errorf("can't write segment 0x%08x: %w", s.start, err)
+	for _, s := range app.Mem.S {
+		fn := fmt.Sprintf("%s.0x%08x%s.bin", *outPrefix, s.Start, s.SectionInfo.Name)
+		if err := os.WriteFile(fn, s.Data, 0666); err != nil {
+			return fmt.Errorf("can't write segment 0x%08x: %w", s.Start, err)
 		}
 
 		glog.Infof("Wrote %v (%d bytes) to %v", s, s.size(), fn)
+		s.LoadInfo.Filename = filepath.Base(fn)
 	}
+
+	j, err := json.MarshalIndent(app, "", "  ")
+	if err != nil {
+		return fmt.Errorf("can't marshal app to JSON: %w", err)
+	}
+	jfn := *outPrefix + ".app.json"
+	if err := os.WriteFile(jfn, j, 0666); err != nil {
+		return fmt.Errorf("can't write app JSON: %w", err)
+	}
+	glog.Infof("Wrote metadata to %v", jfn)
 
 	return nil
 }
