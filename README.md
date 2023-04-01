@@ -23,6 +23,10 @@ To dump the intermediate extraction results for debugging or further analysis,
 set the `-intermediates_prefix` to a filename prefix they should be dumped to.
 Also see the `-v` option to increase the log level.
 
+The `-only_dump_srec` option can be used to produce an SREC file that can be
+written to the printer in “hp reflash” mode (enter from boot menu: long press
+power until USB LED lights up, enter with HOME, HOME, BACK, HOME).
+
 The `ghidra_import.py` script can be used on the `.romnosi_text` image to load
 additional segments. For headless usage, a `ghidra_import.properties` with the
 text `Select metadata JSON OK = <path to app.json>` can be created in the same

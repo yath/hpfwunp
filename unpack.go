@@ -16,11 +16,14 @@ import (
 	"github.com/golang/glog"
 )
 
-var inFile = flag.String("input_filename", "", "name of input file")
-var intermediatesPrefix = flag.String("intermediates_prefix", "", "if nonempty, writes intermediate files with this prefix")
-var outPrefix = flag.String("output_prefix", "", "output filename prefix")
-var flashPageSize = flag.Int("flash_page_size", 0x800, "flash page size")
-var flashOOBsize = flag.Int("flash_oob_size", 0x40, "flash OOB data size")
+var (
+	inFile              = flag.String("input_filename", "", "name of input file")
+	intermediatesPrefix = flag.String("intermediates_prefix", "", "if nonempty, writes intermediate files with this prefix")
+	outPrefix           = flag.String("output_prefix", "", "output filename prefix")
+	onlyDumpSrec        = flag.Bool("only_dump_srec", false, "only dump SREC data suitable for reflash mode to <output_prefix>.srec")
+	flashPageSize       = flag.Int("flash_page_size", 0x800, "flash page size")
+	flashOOBsize        = flag.Int("flash_oob_size", 0x40, "flash OOB data size")
+)
 
 type rasterState struct {
 	height, width uint
@@ -435,6 +438,8 @@ func getFlasherPayload(data []byte, b map[uint]uint) ([]byte, error) {
 	return srec, nil
 }
 
+var errExit = errors.New("no error, just exit")
+
 func pcl2flash(data []byte) ([]byte, error) {
 	glog.Info("Decompressing PCL")
 	var inpos, seg0pos uint
@@ -499,6 +504,16 @@ func pcl2flash(data []byte) ([]byte, error) {
 	seg0, ok := segments[0]
 	if !ok {
 		return nil, errors.New("no segment 0 found")
+	}
+
+	if *onlyDumpSrec {
+		fn := *outPrefix + ".srec"
+		if err := os.WriteFile(fn, seg0, 0666); err != nil {
+			return nil, fmt.Errorf("can't write SREC: %w", err)
+		}
+
+		glog.Infof("Wrote %d bytes to %v", len(seg0), fn)
+		return nil, errExit
 	}
 
 	payload, err := getFlasherPayload(seg0, b)
@@ -1057,6 +1072,9 @@ func main() {
 
 	payload, err := pcl2flash(data)
 	if err != nil {
+		if err == errExit {
+			return
+		}
 		glog.Exitf("Can't extract flash image from PCL: %v", err)
 	}
 	glog.Infof("Extracted %d payload bytes from PCL", len(payload))
