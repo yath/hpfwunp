@@ -1035,16 +1035,17 @@ func main() {
 	flag.Set("logtostderr", "true")
 	flag.Parse()
 
+	args := flag.Args()
 	if *inFile == "" || *outPrefix == "" {
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			glog.Exitf("Both -input_filename and -output_prefix must be set.")
 		}
-		*inFile = os.Args[1]
-		*outPrefix = os.Args[2]
+		*inFile = args[0]
+		*outPrefix = args[1]
 	}
 
-	if *intermediatesPrefix == "" && len(os.Args) == 4 {
-		*intermediatesPrefix = os.Args[3]
+	if *intermediatesPrefix == "" && len(args) == 3 {
+		*intermediatesPrefix = args[2]
 	}
 
 	data, err := os.ReadFile(*inFile)
