@@ -840,6 +840,7 @@ func (m *memory) uncompress(dst, src, count uint32, si *sectionInfo) error {
 type app struct {
 	Mem            *memory                 `json:"memory"`
 	EntryPoint     uint32                  `json:"entry_point"`
+	HeaderAddr     uint32                  `json:"header_address"`
 	UnusedSections map[uint32]*sectionInfo `json:"unused_sections"`
 }
 
@@ -948,9 +949,14 @@ func dumpApp(h *flashHeader, data []byte) (*app, error) {
 		}
 	}
 
+	for addr, s := range si {
+		glog.Infof("Unused section 0x%08x: %v", addr, s)
+	}
+
 	return &app{
 		Mem:            m,
 		EntryPoint:     hf[13],
+		HeaderAddr:     hdrAddr,
 		UnusedSections: si,
 	}, nil
 }

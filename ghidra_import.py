@@ -94,7 +94,10 @@ def main():
     flat = FlatProgramAPI(program)
     entry = addr.getNewAddress(meta['entry_point'])
     flat.addEntryPoint(entry)
-    flat.createLabel(entry, "_start", True)
+    flat.createLabel(entry, "main", True)
+
+    header = addr.getNewAddress(meta['header_address'])
+    flat.createLabel(header, "app_header", True)
 
     program.endTransaction(txn, True)
     openProgram(program)
